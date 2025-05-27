@@ -104,6 +104,21 @@ class Music(commands.Cog):
         parsed = urlparse(url)
         return parsed.scheme in ("http", "https") and "youtube.com" in parsed.netloc
 
+    async def get_song_info(self, url: str):
+        """Fetch the title and uploader of a YouTube video or song."""
+        def fetch_info():
+            try:
+                with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    title = info.get("title", "Unknown Title")
+                    uploader = info.get("uploader", "Unknown Uploader")
+                    return title, uploader
+            except yt_dlp.utils.DownloadError as e:
+                print(f"Error fetching song info: {e}")
+                return None, None
+
+        return await asyncio.to_thread(fetch_info)
+
     @discord.app_commands.command(name="play", description="Play a song from a YouTube or YouTube Music URL.")
     async def play(self, interaction: discord.Interaction, url: str):
         """Plays a song from a YouTube or YouTube Music URL."""
@@ -125,18 +140,20 @@ class Music(commands.Cog):
         if guild_id not in self.song_queue:
             self.song_queue[guild_id] = []
 
-        title = await self.get_song_title(url)
+        title, uploader = await self.get_song_info(url)
         if not title:
-            await interaction.followup.send("Failed to fetch song title. Please try again later.", ephemeral=True)
+            await interaction.followup.send("Failed to fetch song info. Please try again later.", ephemeral=True)
             return
 
-        self.song_queue[guild_id].append((url, title))
-        await interaction.followup.send(f"🎶 Added to queue: {title}")
+        self.song_queue[guild_id].append((url, title, uploader, interaction.user.display_name, interaction.channel))
+        await interaction.followup.send(
+            f"🎶 Added to queue: **{title}** by **{uploader}** (requested by {interaction.user.display_name})"
+        )
 
         if not self.currently_playing.get(guild_id, False):
-            await self._process_queue(vc, interaction.guild)
+            await self._process_queue(vc, interaction.guild, interaction.channel)
 
-    async def _process_queue(self, vc, guild):
+    async def _process_queue(self, vc, guild, _=None):
         """Processes the song queue and plays the next song."""
         guild_id = guild.id
         if not self.song_queue.get(guild_id):
@@ -144,26 +161,18 @@ class Music(commands.Cog):
             return
 
         self.currently_playing[guild_id] = True
-        url, title = self.song_queue[guild_id].pop(0)
+        url, title, uploader, requested_by, text_channel = self.song_queue[guild_id].pop(0)
         filename = await self.download_song(url)
 
         if filename:
+            # Always send "Now playing" in the original requester's channel
+            if text_channel is not None:
+                await text_channel.send(
+                    f"Now playing: **{title}** by **{uploader}** (requested by {requested_by})"
+                )
             await self._play_song(vc, guild, filename)
         else:
-            await self._process_queue(vc, guild)
-
-    async def get_song_title(self, url: str) -> str:
-        """Fetch the title of a YouTube video or song."""
-        def fetch_title():
-            try:
-                with yt_dlp.YoutubeDL({"quiet": True}) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    return info.get("title", "Unknown Title")
-            except yt_dlp.utils.DownloadError as e:
-                print(f"Error fetching song title: {e}")
-                return None
-
-        return await asyncio.to_thread(fetch_title)
+            await self._process_queue(vc, guild, text_channel)
 
     async def download_song(self, url: str):
         """Asynchronously downloads a YouTube song."""
